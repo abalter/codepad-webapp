@@ -138,9 +138,9 @@ chrome = browser = {
 	}
 };
 
-//chrome.app
+/*   Chrome Methods Needed for App   */
 //chrome.notifications
-//chrome.storage
+//[X] chrome.storage
 //chrome.fileSystem
-//chrome.runtime
+//[X] chrome.runtime
 //chrome.app
