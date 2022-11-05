@@ -1,6 +1,15 @@
-# CodePad - A Chrome OS multi-language text editor
+# CodePad - A multi-language text editor web application (WIP)
 
 ![gghBeJ/codepad.jpg](https://image.ibb.co/gghBeJ/codepad.jpg)
+
+## Description
+This project is based on the Chrome App [codepad-chrome-app](https://github.com/andrewbrg/codepad-chrome-app). I am trying to rewrite this as a web application that can run completely client-side. The app needs a server so that it can perform `ajax` requests---i.e. fetch files in the local directory space---but does not run any code on the server.
+
+## Implementation
+The correct way to build this app would be to re-implement the functions of the `chrome` API as pure javascript. As a shortcut, I'm using a [shim](https://en.wikipedia.org/wiki/Shim_(computing)) called [Web-Extension-Shim](https://github.com/Filter-Bubble/Web-Extension-Shim) I found through a [stackoverflow post](https://stackoverflow.com/a/55833066/188963).
+
+The rest of the README below is unchanged from the original.
+
 
 ## Note
 
