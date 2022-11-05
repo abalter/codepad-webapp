@@ -1,7 +1,5 @@
 # CodePad - A multi-language text editor web application (WIP)
 
-![gghBeJ/codepad.jpg](https://image.ibb.co/gghBeJ/codepad.jpg)
-
 ## Description
 This project is based on the Chrome App [codepad-chrome-app](https://github.com/andrewbrg/codepad-chrome-app). I am trying to rewrite this as a web application that can run completely client-side. The app needs a server so that it can perform `ajax` requests---i.e. fetch files in the local directory space---but does not run any code on the server.
 
