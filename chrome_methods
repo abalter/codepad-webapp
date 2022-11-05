@@ -1,0 +1,6 @@
+chrome.app
+chrome.notifications
+chrome.storage
+chrome.fileSystem
+chrome.runtime
+chrome.app

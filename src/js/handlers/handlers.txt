@@ -1,0 +1,2451 @@
+let EditorsHandler = function () {
+
+    this.Notifications = undefined;
+    this.IdeSettings = undefined;
+    this.Files = undefined;
+    this.Modelist = ace.require("ace/ext/modelist");
+    this.StatusBar = ace.require('ace/ext/statusbar').StatusBar;
+
+    this.idx = 0;
+    this.aceClipboard = '';
+    this.currentIdx = null;
+    this.previousIdx = null;
+    this.editorDataObjs = [];
+    this.aceCleanHashes = [];
+    this.navCloseBtnHtml = '<i class="fa fa-fw fa-close text-white action-close-tab" title="Close file"></i>';
+    this.navDirtyBtnHtml = '<i class="fa fa-fw fa-circle-o dirty-tab modal-confirm-close-tab" data-toggle="modal" data-target=".modal-md-container" data-title="Save changes" title="Close file"></i>';
+    this.navTabIconHtml = '<i class="filetype-icon icon"></i>';
+    this.navFilenameHtml = '<span class="tab-name action-edit-tab"></span>';
+    this.newFileDropdownEntry = '<a class="dropdown-item action-add-tab" href="#"></a>';
+
+    this.defaultFileNameIdx = 0;
+    this.defaultTheme = null;
+    this.defaultFont = null;
+    this.defaultFontSize = null;
+    this.defaultFileName = null;
+    this.defaultFileExt = null;
+    this.undefinedFileMode = null;
+    this.undefinedFileIcon = null;
+    this.undefinedFileName = null;
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private Helper
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this._getHash = function (input) {
+        let hash = 0, len = input.length;
+        for (let i = 0; i < len; i++) {
+            hash = ((hash << 5) - hash) + input.charCodeAt(i);
+            hash |= 0;
+        }
+        return hash;
+    };
+
+    this._loadDefaults = function () {
+
+        let that = this;
+        let deferred = $.Deferred();
+
+        $.get('/src/settings/ace.defaults.json', function (data) {
+
+            data = that.isJsonString(data) ? JSON.parse(data) : data;
+
+            that.defaultTheme = data.theme;
+            that.defaultFont = data.fontFamily;
+            that.defaultFontSize = data.fontSize;
+            that.defaultFileName = data.newFileName;
+
+            // noinspection JSUnresolvedVariable
+            that.defaultFileExt = data.newFileExt;
+            // noinspection JSUnresolvedVariable
+            that.undefinedFileMode = data.undefinedFile.mode;
+            // noinspection JSUnresolvedVariable
+            that.undefinedFileIcon = data.undefinedFile.icon;
+            // noinspection JSUnresolvedVariable
+            that.undefinedFileName = data.undefinedFile.name;
+
+            deferred.resolve();
+        });
+
+        return deferred.promise();
+    };
+
+    this._closeTabModals = function (idx) {
+        $(document).find('.modal[data-idx="' + idx + '"]').modal('hide');
+    };
+
+    this._sortableTabsInit = function () {
+
+        let that = this;
+
+        this.getTabsNavContainer().sortable({
+            cursor: 'move',
+            distance: 30,
+            tolerance: 'pointer',
+            placeholder: "ui-state-highlight",
+            stop: function (event, ui) {
+                that.setTabNavFocus($(ui.item).find('a').first().attr('data-idx'));
+            }
+        });
+    };
+
+    this._sortableTabsEnable = function () {
+        this.getTabsNavContainer().sortable('enable');
+    };
+
+    this._sortableTabsDisable = function () {
+        this.getTabsNavContainer().sortable('disable');
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private Ace
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this._bootAceEditor = function (idx, fileContent, fileEntry) {
+
+        let deferred = $.Deferred();
+
+        if (typeof idx === typeof undefined) {
+            return deferred.promise(undefined);
+        }
+
+        idx = parseInt(idx);
+
+        let that = this;
+        let aceEditor = ace.edit('codepad-editor-' + idx);
+
+        // Configure Ace
+        aceEditor.$blockScrolling = Infinity;
+        aceEditor.setTheme(this.defaultTheme);
+        aceEditor.setOptions({
+            fontSize: this.defaultFontSize,
+            fontFamily: this.defaultFont,
+            enableSnippets: true,
+            enableLiveAutocompletion: true,
+            enableBasicAutocompletion: true
+        });
+
+        // Push the editor into our records
+        this.setEditorDataObj(idx, fileEntry, aceEditor);
+
+        // Configure
+        this.setEditorContent(idx, fileContent).then(function () {
+            that._setAceEditorMode(idx, fileEntry);
+            that._populateNavTabIcon(idx);
+            that._populateStatusBar(idx);
+            that._bindAceCustomCommands(idx, aceEditor);
+            that._bindAceCustomEvents(idx, aceEditor);
+
+            deferred.resolve(aceEditor);
+        });
+
+        return deferred.promise();
+    };
+
+    this._bindAceCustomCommands = function (idx, aceEditor) {
+
+        let that = this;
+
+        aceEditor.commands.addCommand({
+            name: '__save',
+            bindKey: {win: 'ctrl-s', mac: 'ctrl-s'},
+            exec: function () {
+                that.onSaveFile(idx);
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__saveAll',
+            bindKey: {win: 'ctrl-shift-s', mac: 'ctrl-shift-s'},
+            exec: function () {
+                that.onSaveAllFiles();
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__open',
+            bindKey: {win: 'ctrl-o', mac: 'ctrl-o'},
+            exec: function () {
+                that.onOpenFile();
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__openProject',
+            bindKey: {win: 'ctrl-shift-o', mac: 'ctrl-shift-o'},
+            exec: function () {
+                $('<div></div>', {
+                    class: 'action-project-open'
+                }).appendTo('body').trigger('click').remove();
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__new',
+            bindKey: {win: 'ctrl-n', mac: 'ctrl-n'},
+            exec: function () {
+                that.onAddNewTab(that.defaultFileExt);
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__fullscreen',
+            bindKey: {win: 'ctrl-alt-f', mac: 'ctrl-alt-f'},
+            exec: function () {
+                chrome.app.window.current().fullscreen();
+                that.Notifications.notify('info', 'Fullscreen mode', 'Press esc to exit fullscreen...');
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__minimize',
+            bindKey: {win: 'ctrl-alt-[', mac: 'ctrl-alt-['},
+            exec: function () {
+                chrome.app.window.current().minimize();
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__maximize',
+            bindKey: {win: 'ctrl-alt-]', mac: 'ctrl-alt-]'},
+            exec: function () {
+                chrome.app.window.current().maximize();
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__fontDecrease',
+            bindKey: {win: 'ctrl-,', mac: 'ctrl-,'},
+            exec: function () {
+                let fontSize = parseInt(aceEditor.getOption('fontSize').replace(/[^0-9]/g, '')) - 1;
+                that.IdeSettings.persistAndApply({key: 'fontSize', val: fontSize + 'pt'});
+            }
+        });
+
+        aceEditor.commands.addCommand({
+            name: '__fontIncrease',
+            bindKey: {win: 'ctrl-.', mac: 'ctrl-.'},
+            exec: function () {
+                let fontSize = parseInt(aceEditor.getOption('fontSize').replace(/[^0-9]/g, '')) + 1;
+                that.IdeSettings.persistAndApply({key: 'fontSize', val: fontSize + 'pt'});
+            }
+        });
+    };
+
+    this._bindAceCustomEvents = function (idx, aceEditor) {
+
+        let that = this;
+
+        // Detect changes in content
+        aceEditor.on('change', function () {
+            that._markNavTabDirty(idx);
+        });
+
+        // Maintain a centralised clipboard
+        aceEditor.on('copy', function (e) {
+            that.aceClipboard = e;
+        });
+        aceEditor.on('cut', function () {
+            that.aceClipboard = aceEditor.getSelectedText();
+        });
+    };
+
+    this._setAceEditorMode = function (idx, fileEntry) {
+
+        if (typeof idx === typeof undefined) {
+            return false;
+        }
+
+        let that = this;
+        let aceEditor = this.getEditor(idx);
+
+        if (typeof aceEditor === typeof undefined) {
+            return false;
+        }
+
+        idx = parseInt(idx);
+        this._getTabMode(idx).then(function (data) {
+            data = that.isJsonString(data) ? JSON.parse(data) : data;
+            if (data.mode === that.undefinedFileMode) {
+                chrome.fileSystem.getDisplayPath(fileEntry, function (path) {
+                    // noinspection JSUnresolvedVariable
+                    that.getEditor(idx).setOption('mode', that.Modelist.getModeForPath(path).mode);
+                    that._populateStatusBar(idx);
+                });
+            } else {
+                that.getEditor(idx).setOption('mode', 'ace/mode/' + data.mode);
+                that._populateStatusBar(idx);
+            }
+        });
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private tabs
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /*######################################################
+    ## GET/SET (Tab Names)
+    ######################################################*/
+    this._getTabNavName = function (idx) {
+        return this.getTabNavEl(idx).find('.tab-name').first().html();
+    };
+
+    this._setTabNavName = function (idx, tabName) {
+
+        if (typeof idx === typeof undefined) {
+            return false;
+        }
+
+        this.getTabNavEl(idx).find('.tab-name').first().html(tabName);
+    };
+
+    /*######################################################
+    ## GET (Tab Others)
+    ######################################################*/
+    this._getNewTabObject = function (fileExt, fileName, nodeId) {
+
+        this.idx++;
+
+        let tabName = fileName;
+        if (typeof fileExt !== typeof undefined) {
+            tabName += '.' + fileExt;
+        }
+
+        let obj = {};
+        obj.idx = this.idx;
+        obj.contentId = 'tab-' + this.idx;
+        obj.codeEditorId = 'codepad-editor-' + this.idx;
+        obj.statusBarId = 'status-bar-' + this.idx;
+        obj.tabName = tabName;
+        obj.nodeId = nodeId;
+
+        let $nav = $(
+            '<li>' +
+            '<a href="#' + obj.contentId + '" title="Double click to rename" role="tab" data-idx="' + this.idx + '" data-toggle="tab">' +
+            this.navFilenameHtml +
+            this.navCloseBtnHtml +
+            '</a>' +
+            '</li>'
+        );
+
+        $nav.find('.tab-name').attr('data-idx', this.idx);
+        $nav.find('.action-close-tab').attr('data-idx', this.idx);
+        $nav.find('.modal-confirm-close-tab').attr('data-idx', this.idx);
+
+        if (typeof nodeId !== typeof undefined && nodeId !== null) {
+            $nav.find('.tab-name').attr('data-nodeid', nodeId);
+            $nav.find('.action-close-tab').attr('data-nodeid', nodeId);
+            $nav.find('.modal-confirm-close-tab').attr('data-nodeid', nodeId);
+        }
+
+        $nav.find('.tab-name').html(obj.tabName);
+
+        obj.nav = $nav;
+
+        let $content = $(
+            '<div class="tab-pane fade" data-idx="' + this.idx + '">' +
+            '<div class="editor"></div>' +
+            '<div class="ace-status-bar text-white bg-dark"></div>' +
+            '</div>'
+        );
+
+        $content.find('.editor').attr('id', obj.codeEditorId);
+        $content.find('.ace-status-bar').attr('id', obj.statusBarId);
+        $content.attr('id', obj.contentId);
+
+        obj.content = $content;
+
+        return obj;
+    };
+
+    this._getTabFileExtension = function (idx) {
+
+        idx = parseInt(idx);
+        let $el = this.getTabNavEl(idx);
+        let regExp = /(?:\.([^.]+))?$/;
+
+        if (typeof $el !== typeof undefined) {
+
+            let ext = regExp.exec($el.find('.tab-name').first().html())[1];
+            return (typeof ext === typeof undefined)
+                ? undefined
+                : ext.toLowerCase();
+        }
+
+        return this.undefinedFileMode;
+    };
+
+    this._getTabMode = function (idx) {
+
+        let that = this;
+        let deferred = $.Deferred();
+        idx = parseInt(idx);
+
+        this.getAllEditorModes().then(function (data) {
+            data = that.isJsonString(data) ? JSON.parse(data) : data;
+            let ext = that._getTabFileExtension(idx);
+            if (typeof ext === typeof undefined) {
+                deferred.resolve({
+                    "icon": that.undefinedFileIcon,
+                    "mode": that.undefinedFileMode,
+                    "name": that.undefinedFileName
+                });
+            }
+
+            if (typeof data[ext] !== typeof undefined) {
+                deferred.resolve(data[ext]);
+            }
+        });
+
+        return deferred.promise();
+    };
+
+    /*######################################################
+    ## POPULATE (Tab Related)
+    ######################################################*/
+    this._populateAddTabDropDown = function () {
+
+        let that = this;
+
+        this.getAllEditorModes().done(function (data) {
+            data = that.isJsonString(data) ? JSON.parse(data) : data;
+            that.getAddTabDropDownContainer().html('');
+            $.each(data, function (i, v) {
+                that.getAddTabDropDownContainer().append(
+                    $(that.newFileDropdownEntry)
+                        .attr('data-type', i)
+                        .append($(that.navTabIconHtml).addClass(v.icon))
+                        .append(v.name)
+                );
+            });
+        });
+    };
+
+    this._populateNavTabIcon = function (idx) {
+
+        let that = this;
+
+        idx = parseInt(idx);
+        this._getTabMode(idx).then(function (data) {
+            data = that.isJsonString(data) ? JSON.parse(data) : data;
+            let $el = that.getTabNavEl(idx).find('*[data-toggle="tab"]').first();
+            $el.find('.filetype-icon').remove();
+            $el.append(that.navTabIconHtml);
+            $el.find('.filetype-icon').addClass(data.icon);
+        });
+    };
+
+    this._populateStatusBar = function (idx) {
+
+        idx = parseInt(idx);
+
+        let editor = this.getEditor(idx);
+        let $statusBar = this.getStatusBarContentEl(idx);
+
+        let ro = editor.getOption('readOnly');
+        let isRo = typeof ro === typeof undefined ? false : ro;
+        let lockClass = isRo ? 'fa-lock' : 'fa-unlock';
+
+        let mode = editor.getOption('mode').split('/').pop().toLowerCase();
+        let lineEndings = editor.getOption('newLineMode').toLowerCase();
+
+        $statusBar.find('.ace_status-info').remove();
+        $statusBar.append(
+            '<div class="ace_status-info">' +
+            '<span><a href="#" class="action-toggle-readonly" title="Toggle readonly" data-toggle="tooltip"><i class="fa ' + lockClass + ' "></i></a></span>' +
+            '<span data-toggle="tooltip" title="Editor mode (' + mode + ')">' + mode + '</span>' +
+            '<span data-toggle="tooltip" title="Line endings (' + lineEndings + ')">' + lineEndings + '</span>' +
+            '</div>'
+        );
+    };
+
+    /*######################################################
+    ## GET/SET (Tab Dirt)
+    ######################################################*/
+    this._markNavTabDirty = function (idx) {
+
+        idx = parseInt(idx);
+
+        if (this.isEditorClean(idx)) {
+            this._markNavTabClean(idx);
+            return;
+        }
+
+        let $el = this.getTabNavEl(idx).find('*[data-toggle="tab"]').first();
+        $el.addClass('is-dirty').find('.dirty-tab').remove();
+        $el.append($(this.navDirtyBtnHtml).attr('data-idx', idx));
+    };
+
+    this._markNavTabClean = function (idx) {
+
+        idx = parseInt(idx);
+
+        let found = false;
+        let hash = this._getHash(this.getEditor(idx).getValue());
+
+        $.each(this.aceCleanHashes, function (i, v) {
+            if (v.idx === idx) {
+                v.hash = hash;
+                found = true;
+            }
+        });
+
+        if (!found) {
+            this.aceCleanHashes.push({
+                "idx": idx,
+                "hash": hash
+            });
+        }
+
+        let $el = this.getTabNavEl(idx).find('*[data-toggle="tab"]').first();
+        $el.removeClass('is-dirty').find('.dirty-tab').remove();
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public Helper
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this.getExtFromFileEntry = function (fileEntry) {
+
+        if (typeof fileEntry === typeof undefined || fileEntry.name.indexOf('.') === -1) {
+            return undefined;
+        }
+
+        return fileEntry.name.split('.').pop();
+    };
+
+    this.getNameFromFileEntry = function (fileEntry) {
+
+        if (typeof fileEntry === typeof undefined) {
+            return undefined;
+        }
+
+        let extension = this.getExtFromFileEntry(fileEntry);
+        return fileEntry.name.replace('.' + extension, '');
+    };
+
+    this.setTabNavFocus = function (idx) {
+
+        idx = parseInt(idx);
+        this.previousIdx = parseInt(this.currentIdx);
+
+        if (this.getNumTabs() === 0) {
+            this.currentIdx = null;
+            return false;
+        }
+
+        let $el = (typeof this.getTabNavEl(idx) === typeof undefined)
+            ? this.getTabsNavContainer().children().first()
+            : this.getTabNavEl(idx);
+
+        $el.find('*[data-toggle="tab"]').first().tab('show');
+        this.currentIdx = parseInt(idx);
+
+        if (typeof this.getEditor(idx) !== typeof undefined) {
+            this.getEditor(idx).focus();
+            return true;
+        }
+
+        return false;
+    };
+
+    this.clearAllOpenTabs = function () {
+        this.getTabsNavContainer().html('');
+        this.getTabsContentContainer().html('');
+        this._sortableTabsInit();
+    };
+
+    this.openFileEntryInAceEditor = function (fileContent, fileEntry) {
+
+        let that = this;
+
+        return this.onAddNewTab(
+            that.getExtFromFileEntry(fileEntry),
+            that.getNameFromFileEntry(fileEntry),
+            fileContent,
+            fileEntry
+        );
+    };
+
+    this.isJsonString = function (str) {
+        try {
+            JSON.parse(str);
+        } catch (e) {
+            return false;
+        }
+        return true;
+    };
+
+    this.startup = function () {
+
+        let that = this;
+
+        // Launch default tab
+        this._loadDefaults().then(function () {
+            that.handleLaunchData(window.launchData.items);
+        });
+    };
+
+    this.handleLaunchData = function (launchDataItems) {
+
+        let that = this;
+        let openFiles = function () {
+
+            let deferred = $.Deferred();
+            let promises = [];
+            launchDataItems = typeof launchDataItems !== typeof undefined
+                ? launchDataItems
+                : [];
+
+            launchDataItems.forEach(function (item) {
+                item.entry.type = (typeof item.type !== typeof undefined) ? item.type : item.entry.type;
+                that.Files.fileOpen(item.entry).then(function (e, fileEntry) {
+                    promises.push(that.openFileEntryInAceEditor(
+                        (typeof e.target.result === typeof undefined) ? undefined : e.target.result,
+                        fileEntry
+                    ));
+                });
+            });
+
+            $.when.apply($, promises).done(function () {
+                deferred.resolve();
+            });
+
+            return deferred.promise();
+        };
+
+        openFiles().then(function () {
+            window.setTimeout(function () {
+                if (that.getNumTabs() === 0) {
+                    that.onAddNewTab(that.defaultFileExt);
+                }
+            }, 400)
+        }).fail(function () {
+            that.onAddNewTab(that.defaultFileExt);
+        });
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public Ace
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this.init = function (ideSettings, notifications, files) {
+
+        let that = this;
+
+        this.Notifications = notifications;
+        this.IdeSettings = ideSettings;
+        this.Files = files;
+
+        document.addEventListener('drop', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            $(document).find('body').removeClass('drag-over');
+        });
+        document.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            $(document).find('body').addClass('drag-over');
+        });
+        document.addEventListener('dragenter', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        document.addEventListener('dragleave', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            $(document).find('body').removeClass('drag-over');
+        });
+
+        this._populateAddTabDropDown();
+
+
+        let $main = $('main');
+        let $header = $('header');
+        let $sidebar = $('.sidebar');
+        let $sidebarMenu = $('.sidebar-menu');
+
+        // Handle resize of window
+        $(window).on('resize', function (e) {
+            $main.css({
+                'margin-top': $header.height().toString() + 'px',
+                'height': Math.ceil(e.target.innerHeight - $(document).find('.ace-status-bar').first().height() - $header.height()).toString() + 'px'
+            });
+            $sidebar.css({
+                'height': ($main.height() - $sidebarMenu.height()).toString() + 'px'
+            });
+        }).resize();
+
+        // Handle adding settings to new tabs
+        $(window).on('_ace.new', function (e, idx) {
+            that.IdeSettings.fetchAll().then(function (settings) {
+                if (typeof settings !== typeof undefined) {
+                    let editor = that.getEditor(idx);
+                    editor.setOptions(settings);
+                    editor.$blockScrolling = Infinity;
+                }
+            });
+        });
+    };
+
+    /*######################################################
+    ## GET/SET (Editor Template)
+    ######################################################*/
+    this.getEditorTemplate = function (idx) {
+
+        idx = parseInt(idx);
+
+        let ext = this._getTabFileExtension(idx);
+        let deferred = $.Deferred();
+
+        if (typeof ext !== typeof undefined) {
+            $.get('/src/html/templates/' + ext + '.tpl').done(function (data) {
+                deferred.resolve(data);
+            }).fail(function () {
+                deferred.resolve('');
+            });
+        }
+
+        return deferred.promise();
+    };
+
+    this.setEditorTemplate = function (idx) {
+
+        let deferred = $.Deferred();
+
+        if (typeof idx === typeof undefined) {
+            deferred.reject();
+            return deferred.promise();
+        }
+
+        idx = parseInt(idx);
+
+        let that = this;
+        let aceEditor = this.getEditor(idx);
+
+        if (this.getEditorContent(idx) !== '') {
+            deferred.resolve();
+        } else {
+            this.getEditorTemplate(idx).then(function (data) {
+                aceEditor.setValue(data);
+                aceEditor.clearSelection();
+                that._markNavTabClean(idx);
+                deferred.resolve();
+            });
+        }
+
+        return deferred.promise();
+    };
+
+    /*######################################################
+    ## GET/SET (Editor Content)
+    ######################################################*/
+    this.getEditorContent = function (idx) {
+
+        idx = parseInt(idx);
+
+        let value = '';
+        let aceEditor = this.getEditor(idx);
+
+        if (typeof aceEditor !== typeof undefined) {
+            value = aceEditor.getValue();
+        }
+
+        return value;
+    };
+
+    this.setEditorContent = function (idx, content) {
+
+        idx = parseInt(idx);
+
+        let aceEditor = this.getEditor(idx);
+        let deferred = $.Deferred();
+
+        if (typeof content === typeof undefined) {
+            this.setEditorTemplate(idx).then(function () {
+                deferred.resolve();
+            });
+        } else {
+            aceEditor.setValue(content);
+            aceEditor.clearSelection();
+            this._markNavTabClean(idx);
+            deferred.resolve();
+        }
+
+        return deferred.promise();
+    };
+
+    /*######################################################
+    ## GET/SET (Editor Data Objects)
+    ######################################################*/
+    this.getEditorDataObj = function (idx) {
+
+        idx = parseInt(idx);
+
+        let aceEditorFull = this.getEditor(idx, true);
+
+        return (typeof aceEditorFull !== typeof undefined)
+            ? aceEditorFull.fileEntry
+            : undefined;
+    };
+
+    this.setEditorDataObj = function (idx, fileEntry, aceEditor) {
+
+        if (typeof idx === typeof undefined) {
+            return false;
+        }
+
+        let found = false;
+
+        idx = parseInt(idx);
+        this.editorDataObjs.forEach(function (editorDataObj) {
+            if (editorDataObj.idx === idx) {
+                editorDataObj.fileEntry = fileEntry;
+
+                found = true;
+            }
+        });
+
+        if (!found && typeof aceEditor !== typeof undefined) {
+            this.editorDataObjs.push({
+                "idx": idx,
+                "ace": aceEditor,
+                "statusBar": new this.StatusBar(aceEditor, document.getElementById('status-bar-' + idx)),
+                "fileEntry": typeof fileEntry === typeof undefined || fileEntry === null ? undefined : fileEntry
+            });
+        }
+    };
+
+    this.removeEditorDataObj = function (idx) {
+
+        if (typeof idx === typeof undefined) {
+            return;
+        }
+
+        idx = parseInt(idx);
+
+        let _editorDataObjs = [];
+        this.editorDataObjs.forEach(function (editorDataObj) {
+            if (editorDataObj.idx !== idx) {
+                _editorDataObjs.push(editorDataObj);
+            }
+        });
+
+        this.editorDataObjs = _editorDataObjs;
+    };
+
+    /*######################################################
+    ## GET/SET (Editors)
+    ######################################################*/
+    this.getCurrentEditor = function () {
+        return this.getEditor(this.currentIdx);
+    };
+
+    this.getEditor = function (idx, returnFullObj) {
+
+        idx = parseInt(idx);
+        let response = undefined;
+
+        this.editorDataObjs.forEach(function (aceEditorEntry) {
+            if (aceEditorEntry.idx === idx) {
+                response = (typeof returnFullObj !== typeof undefined && returnFullObj)
+                    ? aceEditorEntry
+                    : aceEditorEntry.ace;
+                return false;
+            }
+        });
+
+        return response;
+    };
+
+    this.getAllEditorObjects = function () {
+        return this.editorDataObjs;
+    };
+
+    /*######################################################
+    ## GET (Others)
+    ######################################################*/
+    this.getAllEditorModes = function () {
+
+        let deferred = $.Deferred();
+
+        $.get('/src/settings/ace.modes.json').done(function (data) {
+            deferred.resolve(data);
+        });
+
+        return deferred.promise();
+    };
+
+    this.isEditorClean = function (idx) {
+
+        idx = parseInt(idx);
+
+        let isClean = false;
+        let hash = this._getHash(this.getEditor(idx).getValue());
+
+        $.each(this.aceCleanHashes, function (i, v) {
+            if (v.idx === idx && v.hash === hash) {
+                isClean = true;
+            }
+        });
+
+        return isClean;
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public tabs
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /*######################################################
+    ## GET (Tabs)
+    ######################################################*/
+    this.getTabNavEl = function (idx) {
+
+        if (typeof idx === typeof undefined) {
+            return undefined;
+        }
+
+        return this.getTabsNavContainer().find('*[data-idx="' + idx + '"]').first().closest('li');
+    };
+
+    this.getTabsNavContainer = function () {
+        return $(document).find('.tab-list').first();
+    };
+
+    this.getTabContentEl = function (idx) {
+
+        if (typeof idx === typeof undefined) {
+            return undefined;
+        }
+
+        return this.getTabsContentContainer().find('.tab-pane[data-idx="' + idx + '"]').first();
+    };
+
+    this.getTabsContentContainer = function () {
+        return $(document).find('.tab-content').first();
+    };
+
+    this.getTabNavNodeId = function (idx) {
+        return this.getTabNavEl(idx).find('.tab-name').attr('data-nodeid');
+    };
+
+    this.getTabNavIdx = function (nodeId) {
+
+        let idx = undefined;
+
+        $.each(this.getTabsNavContainer().find('.tab-name'), function (i, el) {
+
+            let $el = $(el);
+            let attr = $el.attr('data-nodeid');
+
+            if (typeof attr !== typeof undefined && parseInt(attr) === parseInt(nodeId)) {
+                idx = parseInt($el.attr('data-idx'));
+            }
+        });
+
+        return idx;
+    };
+
+    this.getNumTabs = function () {
+        return parseInt(this.getTabsNavContainer().children().length);
+    };
+
+    /*######################################################
+    ## GET (Others)
+    ######################################################*/
+    this.getStatusBarContentEl = function (idx) {
+
+        let $tabContent = this.getTabContentEl(idx);
+        if (typeof $tabContent === typeof undefined) {
+            return undefined;
+        }
+
+        return $tabContent.find('.ace-status-bar').first();
+    };
+
+    this.getAddTabDropDownContainer = function () {
+        return $(document).find('.add-tab-dropdown').first();
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public Event Handlers
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /*######################################################
+    ## EVENTS (Tab)
+    ######################################################*/
+    this.onAddNewTab = function (fileExt, fileName, fileContent, fileEntry, nodeId) {
+
+        let that = this;
+        let deferred = $.Deferred();
+
+        if (typeof fileName === typeof undefined || fileName === null) {
+            this.defaultFileNameIdx++;
+            fileName = this.defaultFileName + '_' + this.defaultFileNameIdx;
+        }
+
+        let obj = this._getNewTabObject(fileExt, fileName, nodeId);
+        this.getTabsNavContainer().append(obj.nav);
+        this.getTabsContentContainer().append(obj.content);
+
+
+        this._bootAceEditor(obj.idx, fileContent, fileEntry).then(function () {
+            that.setTabNavFocus(obj.idx);
+            that._sortableTabsInit();
+            $(window).trigger('_ace.new', [obj.idx]).trigger('resize');
+            deferred.resolve(obj.idx);
+        });
+
+        return deferred.promise();
+    };
+
+    this.onEditTabName = function (idx) {
+
+        if (typeof idx === typeof undefined) {
+            return false;
+        }
+
+        idx = parseInt(idx);
+
+        let that = this;
+        let $tabNameEl = this.getTabNavEl(idx).find('.tab-name').first();
+        let $siblings = $tabNameEl.siblings().css('visibility', 'hidden');
+        let oldFileName = $tabNameEl.html();
+
+
+        $tabNameEl.attr('contenteditable', 'true').focus().one('focusout', function () {
+
+            that._sortableTabsEnable();
+
+            $siblings.css('visibility', 'visible');
+            $tabNameEl.removeAttr('contenteditable').off('keydown');
+
+            $.event.trigger({
+                type: "_file.rename",
+                time: new Date(),
+                idx: idx,
+                nodeId: that.getTabNavNodeId(idx),
+                oldFileName: oldFileName,
+                newFileName: that._getTabNavName(idx)
+            });
+        });
+
+        $tabNameEl.on('keydown', function (e) {
+
+            let $this = $(this);
+
+            if (e.which === 27) {
+                $this.html(oldFileName);
+            }
+
+            if (e.which === 13 || e.which === 27) {
+                $this.trigger('focusout');
+            }
+        });
+
+        $tabNameEl.on('focusin', function () {
+            that._sortableTabsDisable();
+        });
+
+        $(window).trigger('resize');
+    };
+
+    this.onCloseTab = function (idx) {
+
+        if (typeof idx === typeof undefined) {
+            return false;
+        }
+
+        idx = parseInt(idx);
+        this.getTabNavEl(idx).remove();
+        this.getTabContentEl(idx).remove();
+        this.setTabNavFocus(this.previousIdx);
+        this._closeTabModals(idx);
+        this.removeEditorDataObj(idx);
+
+        $(window).trigger('resize');
+
+        return true;
+    };
+
+    this.onChangeNameFile = function (idx, fileName) {
+
+        this._setTabNavName(idx, fileName);
+        this._setAceEditorMode(idx);
+    };
+
+    this.onToggleReadOnly = function (idx) {
+
+        let that = this;
+        if (typeof idx === typeof undefined) {
+            $.each(this.getAllEditorObjects(), function (i, v) {
+                that.onToggleReadOnly(v.idx);
+            });
+        }
+
+        let ace = this.getEditor(idx);
+
+        if (typeof ace !== typeof undefined) {
+            let isReadOnly = !ace.getOption('readOnly');
+
+            ace.setOption('readOnly', isReadOnly);
+            let $toggleEl = this.getTabContentEl(idx).find('.action-toggle-readonly .fa');
+
+            if (isReadOnly) {
+                $toggleEl.removeClass('fa-unlock').addClass('fa-lock');
+            } else {
+                $toggleEl.removeClass('fa-lock').addClass('fa-unlock');
+            }
+        }
+    };
+
+    /*######################################################
+    ## EVENTS (File)
+    ######################################################*/
+    this.onOpenFile = function () {
+        let that = this;
+        this.Files.fileOpen().then(function (e, fileEntry) {
+            that.openFileEntryInAceEditor((typeof e.target.result === typeof undefined) ? undefined : e.target.result, fileEntry);
+        });
+    };
+
+    this.onDropFiles = function (event) {
+        let that = this;
+        this.Files.fileDrop(event).then(function (files) {
+            files.forEach(function (file) {
+                that.openFileEntryInAceEditor((typeof file[0].target.result === typeof undefined) ? undefined : file[0].target.result, file[1]);
+            });
+        });
+    };
+
+    this.onSaveFile = function (idx) {
+
+        if (typeof idx === typeof undefined) {
+            return false;
+        }
+
+        let that = this;
+        let fileEntry = this.getEditorDataObj(idx);
+
+        let promise = (typeof fileEntry === typeof undefined)
+            ? this.Files.fileSaveAs(this._getTabNavName(idx), this.getEditorContent(idx))
+            : this.Files.fileSave(fileEntry, this.getEditorContent(idx));
+
+        promise.then(function (e, fileEntry) {
+            $.event.trigger({
+                type: '_file.changename',
+                time: new Date(),
+                idx: idx,
+                nodeId: that.getTabNavNodeId(idx),
+                tabName: fileEntry.name
+            });
+
+            that.setEditorDataObj(idx, fileEntry);
+            that._markNavTabClean(idx);
+            that._closeTabModals(idx);
+        });
+    };
+
+    this.onSaveAllFiles = function () {
+
+        let that = this;
+
+        this.getAllEditorObjects().forEach(function (aceEditor) {
+            if (!that.isEditorClean(aceEditor.idx)) {
+                that.onSaveFile(aceEditor.idx);
+            }
+        });
+    };
+
+    this.onRenameFile = function (idx, fileEntry) {
+        this.setEditorDataObj(idx, fileEntry);
+        this.setEditorTemplate(idx);
+        this._setTabNavName(idx, fileEntry.name);
+        this._setAceEditorMode(idx);
+        this._closeTabModals(idx);
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+};let FilesHandler = function () {
+
+    this.Notifications = undefined;
+
+    this.allowedMimeTypes      = [];
+    this.allowedExtensionTypes = [];
+    this.openedDirs            = [];
+    this.openedFiles           = [];
+    this.retainedKey           = 'retained_entries_key';
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private File
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this._waitForIO = function (writer, callback) {
+
+        let that      = this;
+        let start     = Date.now();
+        let reEntrant = function () {
+
+            // noinspection JSUnresolvedVariable
+            let writerState = writer.WRITING;
+
+            if (writer.readyState === writerState && Date.now() - start < 4000) {
+                setTimeout(reEntrant, 100);
+                return;
+            }
+            if (writer.readyState === writerState) {
+                that.Notifications.notify('danger', 'File system', 'Write operation taking too long, aborting! (Writer readyState is ' + writer.readyState + ')');
+                writer.abort();
+            }
+            else {
+                callback();
+            }
+        };
+        setTimeout(reEntrant, 100);
+    };
+
+
+    this._getRetainedEntries = function () {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        chrome.storage.local.get(this.retainedKey, function (data) {
+            if (chrome.runtime.lastError) {
+                that.Notifications.notify('warning', '', chrome.runtime.lastError.message);
+                deferred.reject();
+            }
+            else {
+                let retainedEntries = data[that.retainedKey] || [];
+                deferred.resolve(retainedEntries);
+            }
+        });
+
+        return deferred.promise();
+    };
+
+    this._restoreEntries = function () {
+
+        let that = this;
+
+        this._getRetainedEntries().then(function (data) {
+            data.forEach(function (retainedEntry) {
+                chrome.fileSystem.isRestorable(retainedEntry, function () {
+                    chrome.fileSystem.restoreEntry(retainedEntry, function (restoredEntry) {
+
+                        if (chrome.runtime.lastError) {
+                            console.info(chrome.runtime.lastError.message);
+                        }
+                        else {
+                            // noinspection JSUnresolvedVariable
+                            if (restoredEntry.isDirectory) {
+                                that.openedDirs.push(restoredEntry);
+                            }
+                            else {
+                                that.openedFiles.push(restoredEntry);
+                            }
+                        }
+                    });
+                });
+            });
+        });
+    };
+
+    this._retainEntry = function (entry) {
+
+        let that = this;
+
+        this._getRetainedEntries().then(function (data) {
+
+            let obj                 = {};
+            let _openedDirs         = [];
+            let _openedFiles        = [];
+            let retainEntryHash     = chrome.fileSystem.retainEntry(entry);
+            let retainEntryHashName = retainEntryHash.split(':').pop();
+
+            if (entry.isDirectory) {
+                _openedDirs = [entry];
+            }
+            else {
+                _openedFiles = [entry];
+            }
+
+            that.openedDirs.forEach(function (openedDir) {
+                // noinspection JSUnresolvedVariable
+                if (openedDir.fullPath !== entry.fullPath) {
+                    _openedDirs.push(openedDir);
+                }
+            });
+
+            that.openedFiles.forEach(function (openedFile) {
+                // noinspection JSUnresolvedVariable
+                if (openedFile.fullPath !== entry.fullPath) {
+                    _openedFiles.push(openedFile);
+                }
+            });
+
+
+            obj[that.retainedKey] = [retainEntryHash];
+            data.forEach(function (retainedEntry) {
+                if (retainEntryHashName !== retainedEntry.split(':').pop()) {
+                    obj[that.retainedKey].push(retainedEntry);
+                }
+            });
+
+            that.openedDirs  = _openedDirs;
+            that.openedFiles = _openedFiles;
+            chrome.storage.local.set(obj);
+        });
+    };
+
+    this._getParentDirForFile = function (dirPath) {
+
+        let deferred = $.Deferred();
+
+        let found = false;
+        this.openedDirs.forEach(function (openedDir) {
+            // noinspection JSUnresolvedVariable
+            if (openedDir.fullPath === dirPath) {
+                deferred.resolve(openedDir);
+                found = true;
+            }
+        });
+
+        if (!found) {
+            this.directoryOpen(dirPath).then(function (dirEntry) {
+                deferred.resolve(dirEntry);
+            }).fail(function () {
+                deferred.reject();
+            });
+        }
+
+        return deferred.promise();
+    };
+
+    this._isValidFileMime = function (file) {
+
+        let valid = false;
+
+        if (typeof file.type === typeof undefined ||
+            file.type === 'undefined' ||
+            file.type === '') {
+            return true;
+        }
+
+        this.allowedMimeTypes.forEach(function (mime) {
+            if (file.type.match(mime)) {
+                valid = true;
+            }
+        });
+
+        let fileExt = typeof file.getAsFile === 'function'
+            ? file.getAsFile().name.split('.').pop().toString().toLowerCase()
+            : '';
+
+        this.allowedExtensionTypes.forEach(function (ext) {
+            if (fileExt === ext.toString().toLowerCase()) {
+                valid = true;
+            }
+        });
+
+        return valid;
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public File
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this.init = function (notifications) {
+
+        this.Notifications = notifications;
+        this._restoreEntries();
+        this.allowedMimeTypes      = chrome.runtime.getManifest().file_handlers.text.types;
+        this.allowedExtensionTypes = chrome.runtime.getManifest().file_handlers.text.extensions;
+    };
+
+    this.directoryOpen = function (dirPath) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        let onError = function (err) {
+            that.Notifications.notify('danger', 'Directory Error', err);
+            deferred.reject();
+        };
+
+        chrome.fileSystem.chooseEntry({type: 'openDirectory', suggestedName: dirPath}, function (dirEntry) {
+
+            if (chrome.runtime.lastError) {
+                onError(chrome.runtime.lastError.message);
+                return deferred.promise();
+            }
+
+            that._retainEntry(dirEntry);
+            deferred.resolve(dirEntry);
+        });
+
+        return deferred.promise();
+    };
+
+    this.fileDrop = function (event) {
+
+        let that     = this;
+        let promises = [];
+        let deferred = $.Deferred();
+
+        // noinspection JSUnresolvedVariable
+        let files = event.originalEvent.dataTransfer.items;
+        for (let i = 0; i < files.length; i++) {
+
+            let file = files[i];
+
+            // noinspection JSUnresolvedFunction
+            let fileEntry = file.webkitGetAsEntry();
+            if (file.kind === 'file' && fileEntry) {
+
+                if (that._isValidFileMime(file)) {
+                    promises.push(that.fileOpen(fileEntry));
+                }
+                else {
+                    that.Notifications.notify('danger', 'Filesystem error', fileEntry.name + ' has an unsupported file type (' + fileEntry.type + ') and will not be opened');
+                }
+            }
+        }
+
+        if (promises.length > 0) {
+            $.when.apply($, promises).done(function () {
+
+                let data = [];
+                let args = !$.isArray(arguments[0]) ? [arguments] : arguments;
+
+                for (let i = 0; i < args.length; i++) {
+                    data.push(args[i]);
+                }
+                deferred.resolve(data);
+            });
+        } else {
+            deferred.resolve([]);
+        }
+
+        return deferred.promise();
+    };
+
+    this.fileOpen = function (fileEntry) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        let onError = function (err) {
+            that.Notifications.notify('danger', 'Filesystem error', err);
+            deferred.reject();
+        };
+
+        let readFile = function (fileEntry, deferred) {
+
+            if (typeof fileEntry.file !== 'function') {
+                onError('Entry is not a file');
+                deferred.reject();
+            }
+            else {
+                fileEntry.file(function (file) {
+
+                    let reader = new FileReader();
+
+                    if (!that._isValidFileMime(file)) {
+                        onError(file.name + ' has an unsupported file type (' + file.type + ') and will not be opened');
+                    } else {
+                        reader.readAsText(file);
+                        reader.onerror = onError;
+                        reader.onload  = function (e) {
+                            that._retainEntry(fileEntry);
+                            deferred.resolve(e, fileEntry);
+                        };
+                    }
+                }, onError);
+            }
+        };
+
+        if (typeof fileEntry === typeof undefined) {
+            chrome.fileSystem.chooseEntry({type: 'openWritableFile'}, function (fileEntry) {
+
+                if (chrome.runtime.lastError) {
+                    onError(chrome.runtime.lastError.message);
+                    return deferred.promise();
+                }
+
+                readFile(fileEntry, deferred);
+            });
+        }
+        else {
+            readFile(fileEntry, deferred);
+        }
+
+        return deferred.promise();
+    };
+
+    this.fileSave = function (fileEntry, fileContent) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        let onError = function (err) {
+            that.Notifications.notify('danger', 'Filesystem error', err);
+            deferred.reject();
+        };
+
+        if (typeof fileEntry === typeof undefined) {
+            onError('Undefined file entry');
+            return deferred.promise();
+        }
+
+        chrome.fileSystem.getWritableEntry(fileEntry, function (writableEntry) {
+
+            if (chrome.runtime.lastError) {
+                onError(chrome.runtime.lastError.message);
+                return deferred.promise();
+            }
+
+            // noinspection JSUnresolvedFunction
+            writableEntry.createWriter(function (writer) {
+
+                let blob = new Blob([fileContent]);
+
+                // noinspection JSUnresolvedFunction
+                writer.truncate(blob.size);
+                that._waitForIO(writer, function () {
+                    writer.seek(0);
+                    writer.write(blob, {type: 'text/plain'})
+                });
+
+                writer.onabort    = onError;
+                writer.onerror    = onError;
+                writer.onwriteend = function (e) {
+                    that._retainEntry(writableEntry);
+                    deferred.resolve(e, writableEntry);
+                };
+            });
+        });
+
+        return deferred.promise();
+    };
+
+    this.fileSaveAs = function (fileName, fileContent) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        let onError = function (err) {
+            that.Notifications.notify('danger', 'Filesystem error', err);
+            deferred.reject();
+        };
+
+        chrome.fileSystem.chooseEntry({type: 'saveFile', suggestedName: fileName, acceptsMultiple: false}, function (writableEntry) {
+
+            if (chrome.runtime.lastError) {
+                onError(chrome.runtime.lastError.message);
+                return deferred.promise();
+            }
+
+            // noinspection JSUnresolvedFunction
+            writableEntry.createWriter(function (writer) {
+
+                let blob = new Blob([fileContent]);
+
+                // noinspection JSUnresolvedFunction
+                writer.truncate(blob.size);
+                that._waitForIO(writer, function () {
+                    writer.seek(0);
+                    writer.write(blob, {type: 'text/plain'})
+                });
+
+                writer.onabort    = onError;
+                writer.onerror    = onError;
+                writer.onwriteend = function (e) {
+                    that._retainEntry(writableEntry);
+                    deferred.resolve(e, writableEntry);
+                };
+            });
+        });
+
+        return deferred.promise();
+    };
+
+    this.fileRename = function (fileEntry, oldFileName, newFileName) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        if (typeof fileEntry === typeof undefined || typeof newFileName === typeof undefined) {
+            deferred.resolve(undefined);
+            return deferred.promise();
+        }
+
+        let onError = function (err) {
+            that.Notifications.notify('danger', 'Filesystem error', err);
+            deferred.reject();
+        };
+
+        chrome.fileSystem.getWritableEntry(fileEntry, function (writableFileEntry) {
+
+            if (chrome.runtime.lastError) {
+                onError(chrome.runtime.lastError.message);
+                return deferred.promise();
+            }
+
+            // noinspection JSUnresolvedVariable
+            let dirPath = fileEntry.fullPath.replace(writableFileEntry.fullPath, '');
+
+            that._getParentDirForFile(dirPath).then(function (dirEntry) {
+                // noinspection JSUnresolvedFunction
+                writableFileEntry.moveTo(dirEntry, newFileName, function (updatedEntry) {
+                    that._retainEntry(updatedEntry);
+                    deferred.resolve(updatedEntry);
+                }, onError);
+            });
+        });
+
+        return deferred.promise();
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+};let IdeSettingsHandler = function () {
+
+    this.Editors   = undefined;
+    this.parentKey = 'ide_settings';
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this._persist = function (key, val) {
+
+        if (typeof key === typeof undefined || typeof val === typeof undefined) {
+            return this;
+        }
+
+        let that = this;
+        chrome.storage.sync.get(this.parentKey, function (obj) {
+
+            if (typeof obj === typeof undefined || !obj.hasOwnProperty(that.parentKey)) {
+                obj[that.parentKey] = {};
+            }
+
+            obj[that.parentKey][key] = val;
+            chrome.storage.sync.set(obj);
+        });
+    };
+
+    this._populateViewSetting = function (el) {
+
+        let $el  = $(el);
+        let type = $el.attr('type');
+        let key  = $el.attr('data-option').toString();
+
+        this.fetch(key).then(function (val) {
+
+            switch (type) {
+                case undefined:
+                case 'text':
+                case 'number':
+                case 'range':
+                    $el.val(val);
+                    break;
+
+                case 'checkbox':
+                    $el.prop('checked', (typeof val === 'boolean') ? val : false);
+                    break;
+            }
+
+            if ($el.is('select')) {
+                $el.select2();
+                $el.trigger('change');
+            }
+        });
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this.init = function (Editors) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        that.Editors = Editors;
+
+        chrome.storage.sync.get(this.parentKey, function (obj) {
+            if (typeof obj === typeof undefined || obj[that.parentKey] === undefined) {
+                obj                 = {};
+                obj[that.parentKey] = {};
+                chrome.storage.sync.set(obj, function () {
+                    deferred.resolve();
+                });
+            }
+        });
+
+        return deferred.promise();
+    };
+
+    this.apply = function (obj) {
+
+        if (typeof obj.key === typeof undefined || typeof obj.val === typeof undefined) {
+            return false;
+        }
+
+        this.Editors.getAllEditorObjects().forEach(function (editor) {
+            if (typeof editor !== typeof undefined) {
+                editor.ace.setOption(obj.key, obj.val);
+                editor.ace.$blockScrolling = 'Infinity';
+            }
+        });
+
+        return true;
+    };
+
+    this.fetch = function (key) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+
+        chrome.storage.sync.get(this.parentKey, function (obj) {
+
+            if (typeof obj === typeof undefined || typeof obj[that.parentKey] === typeof undefined || that.Editors.getNumTabs() === 0) {
+                deferred.reject();
+            }
+
+            else if (typeof key === typeof undefined || !key) {
+                deferred.resolve(obj[that.parentKey]);
+            }
+
+            else if (obj[that.parentKey].hasOwnProperty(key)) {
+                deferred.resolve(obj[that.parentKey][key]);
+            }
+
+            else {
+                that.Editors.getAllEditorObjects().forEach(function (editor) {
+                    if (typeof editor !== typeof undefined) {
+                        deferred.resolve(editor.ace.getOption(key));
+                        return deferred.promise();
+                    }
+                });
+                deferred.reject();
+            }
+        });
+
+        return deferred.promise();
+    };
+
+    this.fetchAll = function () {
+        return this.fetch();
+    };
+
+    this.flush = function (key) {
+
+        let that = this;
+
+        if (typeof key !== typeof undefined) {
+            chrome.storage.sync.get(this.parentKey, function (obj) {
+
+                if (typeof obj === typeof undefined || !obj.hasOwnProperty(that.parentKey)) {
+                    obj[that.parentKey] = {};
+                }
+
+                delete obj[that.parentKey][key];
+                chrome.storage.sync.set(obj);
+            });
+        }
+    };
+
+    this.reset = function (key) {
+
+        this.apply({key: key, val: false});
+        this.flush(key);
+    };
+
+    this.persistAndApply = function (obj) {
+
+        if (typeof obj.key === typeof undefined || typeof obj.val === typeof undefined) {
+            return false;
+        }
+
+        if (this.apply(obj) !== false) {
+            this._persist(obj.key, obj.val);
+        }
+    };
+
+    this.getKeyValFromEl = function (el) {
+
+        let $el  = $(el);
+        let type = $el.attr('type');
+        let key  = $el.attr('data-option').toString();
+        let obj  = {key: key, val: undefined};
+
+        if (typeof key === typeof undefined) {
+            return obj;
+        }
+
+        if ($el.is('input') && typeof type !== typeof undefined && type === 'checkbox') {
+            obj.val = $el.prop('checked');
+            return obj;
+        }
+
+        obj.val = $el.val();
+        return obj;
+    };
+
+    this.decorateView = function () {
+
+        let that         = this;
+        let fontOpts     = '';
+        let themeOps     = '';
+        let fontSizeOpts = '';
+
+        $(document).find('[data-action="ide-setting"][data-option]').each(function (i, v) {
+
+            let $el = $(v);
+            let key = $el.attr('data-option').toString();
+
+            if (key === 'theme') {
+                $.get('/src/settings/ace.themes.json', function (data) {
+                    data = that.Editors.isJsonString(data) ? JSON.parse(data) : data;
+                    $.each(data, function (i1, v1) {
+                        themeOps += '<optgroup label="' + i1 + '">';
+                        $.each(v1, function (i2, v2) {
+                            themeOps += '<option value="' + i2 + '">' + v2 + '</option>';
+                        });
+                        themeOps += '</optgroup>';
+                    });
+                    $el.html(themeOps);
+                    that._populateViewSetting($el);
+                });
+            }
+            else if (key === 'fontSize') {
+                $.get('/src/settings/ace.font.sizes.json', function (data) {
+                    data = that.Editors.isJsonString(data) ? JSON.parse(data) : data;
+                    $.each(data, function (i1, v1) {
+                        fontSizeOpts += '<option value="' + i1 + '">' + v1 + '</option>';
+                    });
+                    $el.html(fontSizeOpts);
+                    that._populateViewSetting($el);
+                });
+            }
+            else if (key === 'fontFamily') {
+                $.get('/src/settings/ace.fonts.json', function (data) {
+                    data = that.Editors.isJsonString(data) ? JSON.parse(data) : data;
+                    $.each(data, function (i1, v1) {
+                        fontOpts += '<optgroup label="' + i1 + '">';
+                        $.each(v1, function (i2, v2) {
+                            fontOpts += '<option value="' + i2 + '">' + v2 + '</option>';
+                        });
+                        fontOpts += '</optgroup>';
+                    });
+                    $el.html(fontOpts);
+                    that._populateViewSetting($el);
+                });
+            }
+            else {
+                that._populateViewSetting($el);
+            }
+        });
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+};let ModalsHandler = function () {
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public methods
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    this.getModalContainer = function (el) {
+
+        let dt = $(el).attr('data-target');
+
+        return (typeof dt === typeof undefined)
+            ? undefined
+            : $(document).find('.' + this._cleanDataTarget(dt)).first();
+    };
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private methods
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    this._cleanDataTarget = function (dt) {
+
+        return dt.replace(/[^a-zA-Z0-9\-]/g, '');
+    };
+
+    this._getModalContent = function (el) {
+
+        let $el      = $(el);
+        let deferred = $.Deferred();
+        let callback = function (data) {
+            deferred.resolve({html: data, idx: $el.attr('data-idx'), nodeid: $el.attr('data-nodeid')});
+        };
+
+        if ($el.hasClass('modal-ide-appearance')) {
+            $.get('/src/html/modals/editor/appearance.html').done(callback);
+        }
+
+        if ($el.hasClass('modal-ide-settings')) {
+            $.get('/src/html/modals/editor/ide.settings.html').done(callback);
+        }
+
+        if ($el.hasClass('modal-confirm-close-tab')) {
+            $.get('/src/html/modals/file/confirm.close.tab.html').done(callback);
+        }
+
+        if ($el.hasClass('modal-github-auth')) {
+            $.get('/src/html/modals/github/authenticate.html').done(callback);
+        }
+
+        if ($el.hasClass('modal-rename-file')) {
+            $.get('/src/html/modals/file/rename.file.html').done(callback);
+        }
+
+        if ($el.hasClass('modal-content-help')) {
+            $.get('/src/html/modals/content/help.html').done(callback);
+        }
+
+        if ($el.hasClass('modal-content-rate')) {
+            $.get('/src/html/modals/content/rate.html').done(callback);
+        }
+
+        return deferred.promise();
+    };
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Event Callbacks
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    this.onShowBs = function (el, callback) {
+
+        let $el = $(el);
+        let $mc = this.getModalContainer($el);
+
+        if (typeof $mc === typeof undefined) {
+            return false;
+        }
+
+        this._getModalContent($el).done(function (data) {
+            let $modalContent = $mc.find('.modal-content').first();
+
+            let title = (typeof $el.attr('data-title') !== typeof undefined)
+                ? $el.attr('data-title')
+                : $el.html();
+
+            let $html  = $(data.html);
+            let $modal = $modalContent.find('.modal-body').first().closest('.modal');
+
+            if (typeof data.idx !== typeof undefined) {
+                $html.find('button').attr('data-idx', data.idx);
+                $modal.attr('data-idx', data.idx);
+            }
+
+            if (typeof data.nodeid !== typeof undefined) {
+                $html.find('button').attr('data-nodeid', data.nodeid);
+                $modal.attr('data-nodeid', data.nodeid);
+            }
+
+            $modalContent.find('.modal-title').first().html(title);
+            $modalContent.find('.modal-body').first().html($html);
+
+            if (typeof callback === 'function') {
+                callback();
+            }
+        });
+    };
+
+    this.onHideBs = function (el) {
+
+        let $el           = $(el);
+        let $modalContent = $el.find('.modal-content').first();
+
+        $modalContent.find('.modal-title').first().html('');
+        $modalContent.find('.modal-body').first().html('');
+        $modalContent.find('.modal-body').first().closest('.modal').removeAttr('data-idx');
+        $modalContent.find('.modal-body').first().closest('.modal').removeAttr('data-nodeid');
+    };
+};let NotificationsHandler = function () {
+
+    this.versionUpdateId = 'version_update';
+    this.ratingReminderId = 'rating_reminder';
+
+    this.versionKey = 'last_notified_version';
+    this.requestRateKey = 'rate_requested';
+    this.disableRateKey = 'rate_disabled';
+
+    this.init = function () {
+
+        let that = this;
+
+
+		/*
+        chrome.storage.local.get(this.versionKey, function (version) {
+
+            let currentVer = chrome.runtime.getManifest().version;
+            let previousVer = version[that.versionKey] || false;
+
+            if (!previousVer || currentVer.replace(/[^0-9]/g, '') > previousVer.replace(/[^0-9]/g, '')) {
+
+                if (parseInt(currentVer.replace(/[^0-9]/g, '')) === 1095) {
+                    return;
+                }
+
+                chrome.notifications.create(that.versionUpdateId, {
+                    type: 'basic',
+                    iconUrl: '/src/img/codepad.128.png',
+                    title: 'Code Pad IDE updated',
+                    message: 'Your installation of Code Pad has been updated to v' + currentVer
+                }, function () {
+
+                    if (chrome.runtime.lastError) {
+                        console.info(chrome.runtime.lastError.message);
+                    }
+
+                    let obj = {};
+                    obj[that.versionKey] = currentVer;
+                    chrome.storage.local.set(obj);
+                });
+            }
+        });
+
+        window.setTimeout(function () {
+            chrome.storage.local.get(that.requestRateKey, function (requested) {
+
+                requested = requested[that.requestRateKey] || false;
+
+                if (!requested) {
+                    chrome.notifications.create(that.ratingReminderId, {
+                        type: 'basic',
+                        iconUrl: '/src/img/codepad.128.png',
+                        title: 'Do you like Code Pad?',
+                        message: 'Please leave a rating on the Chrome Store, it helps the application grow :)',
+                        requireInteraction: true,
+                        isClickable: true,
+                        buttons: [{
+                            title: 'Click to give your rating'
+                        }]
+                    }, function () {
+                        if (chrome.runtime.lastError) {
+                            console.info(chrome.runtime.lastError.message);
+                        }
+
+                        let obj = {};
+                        obj[that.requestRateKey] = true;
+                        chrome.storage.local.set(obj);
+                    });
+                }
+            });
+        }, 3000);
+
+
+        chrome.storage.local.get(that.disableRateKey, function (requested) {
+            requested = requested[that.disableRateKey] || false;
+            if (!requested) {
+                window.setTimeout(function () {
+                    $(document).find('[data-toggle="modal"].modal-content-rate').trigger('click');
+                }, 5000);
+            }
+        });
+
+        chrome.notifications.onButtonClicked.addListener(function (notificationId) {
+            if (notificationId === that.ratingReminderId) {
+                window.open('https://chrome.google.com/webstore/detail/code-pad-ide/adaepfiocmagdimjecpifghcgfjlfmkh/reviews');
+            }
+        });
+		*/
+    };
+
+    this.notify = function (type, title, message) {
+
+        let icon;
+        let sound;
+
+        type = (message === 'User cancelled') ? 'warning' : type;
+
+        switch (type) {
+            case 'danger':
+                icon = 'fa fa-fw fa-exclamation-triangle';
+                sound = '/src/sounds/notif-danger.ogg';
+                console.info(message);
+                break;
+            case 'warning':
+                icon = 'fa fa-fw fa-exclamation-triangle';
+                sound = '/src/sounds/notif-danger.ogg';
+                console.info(message);
+                break;
+            default:
+                icon = 'fa fa-fw fa-bell';
+                sound = '/src/sounds/notif-info.ogg';
+                console.info(message);
+                break;
+        }
+
+        let obj = {icon: icon, message: message};
+
+        if (typeof message === typeof undefined || message === 'User cancelled') {
+            return false;
+        }
+
+        if (typeof title !== typeof undefined && title.length > 0) {
+            obj.title = '<strong>' + title + '</strong><br />';
+        }
+
+        $.notify(obj, {
+            type: type,
+            delay: 3000,
+            placement: {
+                from: "bottom",
+                align: "right"
+            },
+            offset: 10,
+            animate: {
+                enter: 'animated flipInX',
+                exit: 'animated fadeOutUp'
+            },
+            onShow: function () {
+
+                let $el = $(
+                    '<audio class="sound-player" autoplay="autoplay" style="display:none;">' +
+                    '<source src="' + sound + '" />' +
+                    '</audio>'
+                );
+
+                $el.appendTo('body');
+                setTimeout(function () {
+                    $el.remove()
+                }, 3000);
+            }
+        });
+    };
+};
+let SidebarHandler = function () {
+
+    this.Notifications = undefined;
+    this.Editors       = undefined;
+    this.Files         = undefined;
+
+    this.dirEntry      = null;
+    this.isInitialised = false;
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Private Sidebar
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this._initTreeView = function (dirTreeJson, title) {
+
+        let $sidebar = this.getSidebar();
+
+        if (dirTreeJson.length === 0) {
+            return false;
+        }
+
+        if (this.isInitialised) {
+            $sidebar.treeview('remove');
+        } else {
+            $sidebar.html('');
+        }
+
+        $sidebar.treeview({data: dirTreeJson, silent: false});
+        this.isInitialised = true;
+        this._setSidebarTopMenu(title);
+        this._initBootstrapMenu();
+        this.compressNodes();
+        this.showSidebar();
+    };
+
+    this._initBootstrapMenu = function () {
+
+        let that = this;
+
+        let makeClickAbleEl = function (e) {
+            return $('<a></a>', {
+                'class': 'modal-rename-file',
+                'data-toggle': 'modal',
+                'data-target': '.modal-md-container',
+                'data-title': 'Rename file',
+                'data-idx': that.Editors.getTabNavIdx(e.data('nodeid')),
+                'data-nodeid': e.data('nodeid'),
+                'data-old-filename': $(e).text(),
+                'data-new-filename': $(e).text()
+            });
+        };
+
+        new BootstrapMenu('.node-sidebar', {
+            fetchElementData: function ($el) {
+                return $el
+            },
+            actions: [{
+                name: 'Rename',
+                classNames: 'dropdown-item',
+                iconClass: 'fa fa-edit',
+                onClick: function (e) {
+                    makeClickAbleEl(e).appendTo('body').trigger('click').remove();
+                }
+            }]
+        });
+    };
+
+    this._setSidebarTopMenu = function (title) {
+        this.getAside().find('.sidebar-menu-title').html(title);
+    };
+
+    this._setNodeName = function (nodeId, nodeName) {
+
+        if (typeof nodeId === typeof undefined || typeof nodeName === typeof undefined) {
+            return false;
+        }
+
+        let $el      = this.getSidebar().find('.node-sidebar[data-nodeid="' + nodeId + '"]').first();
+        let $spanEls = $el.find('span');
+
+        // Update the node
+        let node = this.getSidebar().treeview('getNode', nodeId);
+        if (typeof node !== typeof undefined) {
+            node.path = node.path.replace(node.text, nodeName);
+            node.text = nodeName;
+        }
+
+        $el.html(nodeName);
+        $el.prepend($spanEls);
+    };
+
+    this._closeNodeModals = function (nodeId) {
+        $(document).find('.modal[data-nodeid="' + nodeId + '"]').modal('hide');
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public Sidebar
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    this.init = function (notifications, editors, files) {
+        this.Notifications = notifications;
+        this.Editors       = editors;
+        this.Files         = files;
+    };
+
+    this.getSidebar = function () {
+        return $(document).find('.sidebar').first();
+    };
+
+    this.getAside = function () {
+        return $(document).find('aside').first();
+    };
+
+    this.showSidebar = function () {
+        this.getAside().collapse('show');
+    };
+
+    this.hideSidebar = function () {
+        this.getAside().collapse('hide');
+    };
+
+    this.expandNodes = function () {
+        let $sidebar = this.getSidebar();
+        if (this.isInitialised) {
+            $sidebar.treeview('expandAll');
+        }
+    };
+
+    this.compressNodes = function () {
+        let $sidebar = this.getSidebar();
+        if (this.isInitialised) {
+            $sidebar.treeview('collapseAll');
+        }
+    };
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    /// Public Event Handlers
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /*######################################################
+    ## EVENT (Sidebar)
+    ######################################################*/
+    this.onOpenProject = function () {
+
+        let that  = this;
+        let modes = [];
+
+        this.Files.directoryOpen().then(function (dirEntry) {
+
+            that.dirEntry = dirEntry;
+
+            let sortFn = function (a, b) {
+                if (a.typeFile !== b.typeFile) {
+                    if (a.typeFile < b.typeFile) return -1;
+                    if (a.typeFile > b.typeFile) return 1;
+                }
+                if (a.text < b.text) return -1;
+                if (a.text > b.text) return 1;
+                return 0;
+            };
+
+            let buildTreeViewJson = function (entry, callback) {
+
+                let results = [];
+
+                // noinspection JSUnresolvedFunction
+                entry.createReader().readEntries(function (entries) {
+
+                    let pending = entries.length;
+
+                    if (!pending) {
+
+                        // noinspection JSUnresolvedVariable
+                        let obj = {
+                            text: entry.name,
+                            path: entry.fullPath,
+                            typeFile: 0,
+                            icon: 'fa fa-fw fa-folder',
+                            selectable: false
+                        };
+
+                        if (results.length > 0) {
+                            results   = results.sort(sortFn);
+                            obj.nodes = results;
+                        }
+
+                        callback(obj);
+                    }
+
+                    entries.forEach(function (item) {
+                        if (item.isDirectory) {
+
+                            buildTreeViewJson(item, function (res) {
+
+                                // noinspection JSUnresolvedVariable
+                                let obj = {
+                                    text: item.name,
+                                    path: item.fullPath,
+                                    typeFile: 0,
+                                    icon: 'fa fa-fw fa-folder',
+                                    selectable: false
+                                };
+
+                                if (res.length > 0) {
+                                    res       = res.sort(sortFn);
+                                    obj.nodes = res;
+                                }
+
+                                results.push(obj);
+                                results = results.sort(sortFn);
+
+                                if (!--pending) {
+                                    results = results.sort(sortFn);
+                                    callback(results);
+                                }
+                            });
+                        }
+                        else {
+
+                            let ext = that.Editors.getExtFromFileEntry(item);
+
+                            // noinspection JSUnresolvedVariable
+                            results.push({
+                                text: item.name,
+                                path: item.fullPath,
+                                typeFile: 1,
+                                icon: (modes.hasOwnProperty(ext)) ? modes[ext].icon : 'fa fa-fw fa-file fa-sidebar',
+                                selectable: false
+                            });
+
+                            results = results.sort(sortFn);
+
+                            if (!--pending) {
+                                results = results.sort(sortFn);
+                                callback(results);
+                            }
+                        }
+                    });
+                });
+            };
+
+            that.Editors.getAllEditorModes().then(function (data) {
+                modes = that.Editors.isJsonString(data) ? JSON.parse(data) : data;
+                buildTreeViewJson(dirEntry, function (treeViewJson) {
+                    that._initTreeView(treeViewJson, dirEntry.name);
+                    that.Editors.clearAllOpenTabs();
+                });
+            });
+        });
+    };
+
+    this.onNodeClick = function (nodeId) {
+
+        let that     = this;
+        let deferred = $.Deferred();
+        let node     = this.getSidebar().treeview('getNode', nodeId);
+
+        if (node.typeFile === 1) {
+
+            let idx = this.Editors.getTabNavIdx(nodeId);
+            if (typeof idx !== typeof undefined) {
+                that.Editors.setTabNavFocus(idx);
+                deferred.resolve(idx, that.Editors.getEditorDataObj(idx));
+            }
+            else {
+                // noinspection JSUnresolvedFunction
+                this.dirEntry.getFile(node.path, {}, function (fileEntry) {
+                    that.Files.fileOpen(fileEntry).then(function (e, fileEntry) {
+                        that.Editors.onAddNewTab(
+                            that.Editors.getExtFromFileEntry(fileEntry),
+                            that.Editors.getNameFromFileEntry(fileEntry),
+                            e.target.result,
+                            fileEntry,
+                            nodeId
+                        ).then(function (idx) {
+                            deferred.resolve(idx, fileEntry);
+                        });
+                    });
+                });
+            }
+        }
+
+        return deferred.promise();
+    };
+
+    /*######################################################
+    ## EVENT (File)
+    ######################################################*/
+    this.onRenameFile = function (nodeId, fileEntry) {
+        this._setNodeName(nodeId, fileEntry.name);
+        this._closeNodeModals(nodeId);
+    };
+
+    this.onChangeNameFile = function (nodeId, fileName) {
+        this._setNodeName(nodeId, fileName);
+    };
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+};
