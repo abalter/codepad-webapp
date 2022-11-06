@@ -43,6 +43,9 @@ let FilesHandler = function () {
         let deferred = $.Deferred();
 
         chrome.storage.local.get(this.retainedKey, function (data) {
+            console.log("files.js:45");
+            console.log(data);
+
             if (chrome.runtime.lastError) {
                 that.Notifications.notify('warning', '', chrome.runtime.lastError.message);
                 deferred.reject();

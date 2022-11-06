@@ -1,3 +1,5 @@
+console.log("Manifest.json");
+
 let manifestJson = 
 {
   "version": "1.0.96",

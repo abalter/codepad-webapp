@@ -1,3 +1,7 @@
+console.log("in WebExtensionsShim.js");
+console.log("Manifest:");
+console.log(manifestJson);
+
 var modernizr =  { // see https://github.com/Modernizr/Modernizr/blob/master/feature-detects/storage/localstorage.js
 	existsLocalStorage: function () { 
 		var test = "test";
@@ -115,6 +119,7 @@ chrome = browser = {
 	},
 	runtime: {
 		getManifest: function() {
+			console.log(manifestJson);
 			return manifestJson;
 		}
 	},
